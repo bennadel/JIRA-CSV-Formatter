@@ -1,0 +1,668 @@
+<!doctype html>
+<html ng-app="App">
+<head>
+	<meta charset="utf-8" />
+
+	<title>
+		JIRA CSV Formatter by Ben Nadel
+	</title>
+
+	<link rel="stylesheet" type="text/css" href="//fonts.googleapis.com/css?family=Open+Sans:300,400,600,700"></link>
+	<link rel="stylesheet" type="text/css" href="./app.css"></link>
+</head>
+<!-- CAUTION: Using Body tag as a component directive. -->
+<body>
+
+	<header>
+		<h1>
+			JIRA CSV Formatter
+		</h1>
+	</header>
+
+	<section class="csv-input">
+
+		<h3>
+			CSV Content
+		</h3>
+
+		<label class="has-header">
+			<input type="checkbox" ng-model="vm.form.hasHeader" ng-change="vm.processCSV()" />
+			Use first row as header column list.
+		</label>
+
+		<textarea 
+			ng-model="vm.form.csv"
+			ng-change="vm.processCSV()"
+			placeholder="Paste CSV content here... (or drag-n-drop a CSV file)">
+		</textarea>
+
+	</section>
+
+	<section class="jira-output">
+
+		<h3>
+			JIRA Table Markup
+		</h3>
+
+		<textarea id="jira" ng-model="vm.form.jira" readonly="readonly"></textarea>
+
+	</section>
+
+	<section class="data-output">
+
+		<h3>
+			Table Preview
+		</h3>
+
+		<div class="preview" ng-switch="!! vm.recordset">
+
+			<table ng-switch-when="true">
+				<tr>
+					<th ng-repeat="column in vm.recordset.columns track by $index">
+						{{ column }}
+					</th>
+				</tr>
+				<tr ng-repeat="row in vm.recordset.rows track by $index">
+					<td ng-repeat="value in row track by $index">
+						{{ value }}
+					</td>
+				</tr>
+			</table>
+
+			<div ng-switch-when="false" class="no-data">
+				No data yet to preview.
+			</div>
+
+		</div>
+
+	</section>
+
+	<section ng-if="vm.isShowingDropzone" class="drop-cover">
+		
+		<div class="lasso">
+
+			<span class="label">
+				Drop CSV File Here...
+			</span>
+
+		</div>
+
+	</section>
+
+
+	<!-- Load vendor scripts. -->
+	<script type="text/javascript" src="./vendor/angular-1.4.8/angular.min.js"></script>
+	<script type="text/javascript" src="./vendor/plupload-2.1.8/moxie.min.js"></script>
+	<script type="text/javascript">
+
+		// Define our application module.
+		angular.module( "App", [ "ng" ] );
+
+
+		// --------------------------------------------------------------------------- //
+		// --------------------------------------------------------------------------- //
+
+
+		// I manage the application component directive.
+		angular.module( "App" ).directive(
+			"body",
+			function bodyDirective( $document, $timeout, $log, readFile ) {
+
+				// Return the directive definition object.
+				return({
+					controller: BodyController,
+					controllerAs: "vm",
+					link: link,
+					restrict: "E"
+				});
+
+
+				// I bind the JavaScript events to the view-model.
+				function link( scope, element, attributes, controller ) {
+
+					// Set up our dropzone (using the Body).
+					var dropzone = new mOxie.FileDrop({
+						drop_zone: element[ 0 ]
+					});
+					dropzone.ondrop = handleDrop;
+					dropzone.init();
+
+					// Because the drag API is basically a nightmare wrapped in an insult,
+					// we need to listen for various drag events to make sense of what the
+					// user is actually doing.
+					element.on( "dragenter", handleDragenter );
+					element.on( "dragleave", handleDragleave );
+					element.on( "dragover", handleDragover );
+
+					// Part of the drag-n-drop dance requires a timer to prevent 
+					// prematurely closing the dropzone overlay while the user is actively
+					// dragging a file onto the window.
+					var leaveTimer = null;
+
+					// When the user clicks on the JIRA Output textarea, let's highlight 
+					// it for easy copy-n-paste operations.
+					var jiraOutput = angular
+						.element( $document[ 0 ].getElementById( "jira" ) )
+						.on( "click", highlightOutput )
+					;
+
+
+					// ---
+					// PRIVATE METHODS.
+					// ---
+
+
+					// I handle the drag-enter event.
+					function handleDragenter( event ) {
+
+						// If we're not showing the dropzone overlay yet, show it.
+						if ( ! controller.isShowingDropzone ) {
+
+							scope.$apply( controller.showDropzone );
+
+						}
+
+					}
+
+
+					// I handle the drag-leave event.
+					function handleDragleave( event ) {
+
+						// Because the drag events fire in a horrible horrible horrible 
+						// order, we can't believe that the leave event really indicates
+						// that the user has intended to leave. As such, we have to put
+						// the "hide" command in a timeout, giving the "dragover" event
+						// a chance to cancel this timer.
+						leaveTimer = $timeout( controller.hideDropzone, 50 );
+
+					}
+
+
+					// I handle the drag-over event.
+					function handleDragover( event ) {
+
+						// Clear any running leave-timer so that we don't prematurely
+						// close the dropzone overlay.
+						$timeout.cancel( leaveTimer );
+
+					}
+
+
+					// I handle the drop event for the file objects and read the file 
+					// content if it is applicable.
+					function handleDrop( event ) {
+
+						var file = dropzone.files[ 0 ];
+						
+						// If the file type looks valid, read in the content and pass
+						// it off to the controller for view-model integration.
+						if ( isValidFilename( file.name ) ) {
+
+							readFile( file.getSource() )
+								.then( controller.setCSV, $log.error )
+								.then( highlightOutput )
+							;
+							
+						}
+
+						// No matter what happens with the file, close the overlay.
+						scope.$apply( controller.hideDropzone );
+
+						// Destroy all of the dropped files to prevent memory leaks.
+						for ( var i = 0, length = dropzone.files.length ; i < length ; i++ ) {
+
+							dropzone.files[ i ].destroy();
+
+						}
+
+					}
+
+
+					// I highlight the JIRA output text for easy copy-paste action.
+					function highlightOutput() {
+
+						// Since the JIRA output is controlled by an ngModel binding, we
+						// need to give the HTML time to catch up with the change in the
+						// view-model. As such, wrap highlight in a timeout.
+						setTimeout(
+							function waitForHTMLToCatchUp() {
+
+								jiraOutput[ 0 ].focus();
+								jiraOutput[ 0 ].select();
+
+							}
+						);
+
+					}
+
+
+					// I determine if the given filename matches a file type that is
+					// likely to have parsable content.
+					function isValidFilename( name ) {
+
+						return( /\.(csv|txt)$/i.test( name ) );
+
+					}
+
+				}
+
+
+				// I control the application component.
+				function BodyController( $scope, parseCSV ) {
+
+					var vm = this;
+
+					// I hold the ng-model bindings for the form fields.
+					vm.form = {
+						csv: "",
+						jira: "",
+						hasHeader: true
+					};
+
+					// I determine if the dropzone overlay is showing.
+					vm.isShowingDropzone = false;
+
+					// I hold the recordset instance that we'd like to render as a table
+					// in JIRA markdown.
+					vm.recordset = null;
+
+					// Expose the public methods.
+					vm.hideDropzone = hideDropzone;
+					vm.processCSV = processCSV;
+					vm.setCSV = setCSV;
+					vm.showDropzone = showDropzone;
+
+
+					// ---
+					// PUBLIC METHODS.
+					// ---
+
+
+					// I hide the dropzone overlay.
+					function hideDropzone() {
+
+						vm.isShowingDropzone = false;
+
+					}
+
+
+					// I process the CSV data that is currently in the csv binding.
+					function processCSV() {
+
+						// If there is no CSV data, nullify the recordset.
+						if ( ! vm.form.csv ) {
+
+							vm.form.jira = "";
+							vm.recordset = null;
+							return;
+
+						}
+
+						// If we've gotten this far, we have content to parse. First, 
+						// let's parse the content into a simple two-dimensional array.
+						var rows = parseCSV( vm.form.csv );
+
+						// Now, let's convert the two-dimensional array into an actual
+						// recordset that we can render in the markup.
+						if ( vm.form.hasHeader ) {
+
+							vm.recordset = {
+								columns: rows[ 0 ],
+								rows: rows.slice( 1 )
+							};
+
+						} else {
+
+							vm.recordset = {
+								columns: buildColumns( rows[ 0 ].length ),
+								rows: rows
+							}
+							
+						}
+
+						// Calculate the JIRA markup required to render the recordset.
+						// This the *actual data* that we are trying to get at.
+						vm.form.jira = recordsetToJIRA( vm.recordset );
+
+					}
+
+
+					// I set the CSV content and then process it.
+					function setCSV( newCSV ) {
+
+						vm.form.csv = newCSV;
+						processCSV();
+
+					}
+
+
+					// I show the dropzone overlay.
+					function showDropzone() {
+
+						vm.isShowingDropzone = true;
+
+					}
+
+
+					// ---
+					// PRIVATE METHODS.
+					// ---
+
+
+					// I build a columns collection with the given column count.
+					function buildColumns( count ) {
+
+						var letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".match( /./g );
+						var columns = [];
+
+						for ( var i = 0 ; i < count ; i++ ) {
+
+							var groupIndex = Math.floor( i / letters.length );
+							var letter = letters[ i % letters.length ]
+							
+							var label = groupIndex
+								? ( groupIndex + 1 + letter )
+								: letter
+							;
+							
+							columns.push( label );
+
+						}
+
+						return( columns );
+
+					}
+
+
+					// I convert the given recordset into JIRA table markdown.
+					function recordsetToJIRA( recordset ) {
+
+						var newline = "\n";
+
+						// We can get the JIRA markdown by concatenating the markdown 
+						// representation for the Header and the Body of the table.
+						return( 
+							columnsToString( recordset.columns ) + 
+							newline + 
+							rowsToString( recordset.rows )
+						);
+
+
+						// I convert the given columns collection to a JIRA markdown string.
+						function columnsToString( columns ) {
+
+							return( "||" + escapePipes( columns ).join( "||" ) + "||" );
+
+						}
+
+
+						// I take the given collection and escape all embedded pipes in
+						// each item. We need to do this because the pipe is a special
+						// character in the JIRA markdown.
+						function escapePipes( collection ) {
+
+							return(
+								collection.map(
+									function operator( value ) {
+
+										return( value.replace( /\|/g, "\\|" ) );
+
+									}
+								)
+							);
+
+						}
+
+
+						// I convert the given rows collection to a JIRA markdown string.
+						function rowsToString( rows ) {
+
+							var rowBuffer = rows.map(
+								function operator( values ) {
+
+									return( "|" + escapePipes( values ).join( "|" ) + "|" );
+
+								}
+							);
+
+							return( rowBuffer.join( newline ) );
+
+						}
+
+					}
+
+				}
+
+			}
+		);
+
+	
+		// --------------------------------------------------------------------------- //
+		// --------------------------------------------------------------------------- //
+
+
+		// I provide a service that reads a File object and returns a promise.
+		angular.module( "App" ).factory(
+			"readFile",
+			function readFileFactory( $q ) {
+
+				return( readFile );
+
+
+				// I read the the given file object and return promise that will either
+				// resolve with the text content or will reject with the error object 
+				// provided by the File API.
+				function readFile( source ) {
+
+					var deferred = $q.defer();
+					
+					var reader = new FileReader();
+					reader.onload = handleLoad;
+					reader.onerror = handleError;
+					reader.readAsText( source );
+
+					return( deferred.promise );
+
+
+					// I handle file IO errors.
+					function handleError( event ) {
+
+						deferred.reject( event.target.error );
+						reader = null;
+
+					}
+
+
+					// I handle a successful file read.
+					function handleLoad( event ) {
+
+						deferred.resolve( event.target.result );
+						reader = null;
+
+					}
+
+				}
+
+			}
+		);
+
+
+		// --------------------------------------------------------------------------- //
+		// --------------------------------------------------------------------------- //
+
+
+		// I provide a service that parses CSV text content.
+		angular.module( "App" ).provider(
+			"parseCSV",
+			function parseCSVProvider() {
+
+				// I am the default field delimiter for the CSV content. By default, 
+				// we'll use a best-guess approach to the delimiter. However, if this
+				// delimiter is defined, we'll use it instead of guessing.
+				var defaultDelimiter = "";
+				var fallbackDelimiter = ",";
+
+				// Return the public API.
+				return({
+					getDelimiter: getDelimiter,
+					setDelimiter: setDelimiter,
+
+					// The underlying factory.
+					$get: parseCSVFactory
+				});
+
+
+				// ---
+				// PULIC METHODS.
+				// ---
+
+
+				// I get the current default delimiter.
+				function getDelimiter() {
+
+					return( defaultDelimiter );
+
+				}
+
+
+				// I set the new default delimiter.
+				function setDelimiter( newDelimiter ) {
+
+					// Only use the first character as the delimiter.
+					defaultDelimiter = String( newDelimiter || "," ).slice( 0, 1 );
+					
+				}
+
+
+				// ---
+				// FACTORY METHOD.
+				// ---
+
+
+				// I build the CSV parsing service.
+				function parseCSVFactory() {
+
+					return( parseCSV );
+
+
+					// ---
+					// PUBLIC METHODS.
+					// ---
+
+
+					// I parse the given CSV data using the optional delimiter. The 
+					// parsed payload is an array of arrays.
+					function parseCSV( data, delimiter ) {
+
+						delimiter = ( delimiter || defaultDelimiter || guessDelimiter( data ) );
+
+						var rows = [];
+						var values = null;
+
+						var matches = null;
+						var pattern = new RegExp(
+							(
+								// Delimiters.
+								"(^|\\" + delimiter + "|\\r?\\n|\\r)" +
+
+								"(?:" +
+									// Quoted fields.
+									"\"([^\"]*(?:\"\"[^\"]*)*)\"" +
+
+									"|" +
+
+									// Standard fields.
+									"([^\"\\" + delimiter + "\\r\\n]*)" + 
+								")"
+							),
+							"gi"
+						);
+
+						// Keep looping over the matches until we've processed the 
+						// entire CSV content.
+						while ( matches = pattern.exec( data ) ) {
+
+							// Extract the groups for short-hand access.
+							var $delimiter = matches[ 1 ];
+							var $quotedField = matches[ 2 ];
+							var $nakedField = matches[ 3 ];
+
+							// If we have a non-field delimiter, start a new row of values.
+							// --
+							// NOTE: Since we are aggressively matching on "^", our first 
+							// match should always be the start of the content and therefore
+							// the start of the first row.
+							if ( $delimiter !== delimiter ) {
+
+								rows.push( values = [] );
+
+							}
+
+							// If it's a quoted field, escape un-escape embedded quotes.
+							if ( $quotedField ) {
+
+								values.push( $quotedField.replace( /""/g, "\"" ) );
+
+							// If it's a naked field, just add as-is.
+							} else {
+
+								values.push( $nakedField );
+
+							}
+
+						}
+
+						return( rows );
+
+					}
+
+
+					// ---
+					// PRIVATE METHODS.
+					// ---
+
+
+					// I guess the correct delimiter by counting the possible delimiters
+					// and choosing the most frequent one. If no clear winner can be found,
+					// I fall back to using the fallbackDelimiter.
+					function guessDelimiter( data ) {
+
+						var commaCount = ( data + "," ).match( /,/g ).length;
+						var tabCount = ( data + "\t" ).match( /\t/g ).length;
+						var colonCount = ( data + ":" ).match( /:/g ).length;
+
+						// If all the counts are equal, use the fallback since we couldn't
+						// make an educated decision.
+						if ( ( commaCount === tabCount ) && ( commaCount === colonCount ) ) {
+
+							return( fallbackDelimiter );
+
+						// Since we know that one of the delimiters was a winner, check to
+						// see if the comma (most common) is the winner.
+						} else if ( ( commaCount > tabCount ) && ( commaCount > colonCount ) ) {
+
+							return( "," );
+
+						// If the comma didn't win, check to see if the tab is the winner.
+						} else if ( tabCount >= colonCount ) {
+
+							return( "\t" );
+
+						// 
+						} else {
+
+							return( ":" );
+
+						}
+
+					}
+
+				}
+
+			}
+		);
+
+	</script>
+
+</body>
+</html>
