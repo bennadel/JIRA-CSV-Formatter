@@ -7,7 +7,7 @@ This is a super simple utility page that can take CSV text content, or a CSV
 file, and output the markup that JIRA can use to generate an HTML table in the 
 issue comments. 
 
-Run the JIRA CSV Formatter application.
+**[Run the JIRA CSV Formatter application](http://bennadel.github.io/JIRA-CSV-Formatter/)**.
 
 All the CSV parsing is done on the client - no server required. And, the 
 parser will try to calculate the most appropriate field delimiter based on 
